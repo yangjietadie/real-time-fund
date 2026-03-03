@@ -305,117 +305,97 @@ export const fetchFundData = async (c) => {
           .catch(() => resolveT(null));
       });
       const holdingsPromise = new Promise((resolveH) => {
-        const holdingsUrl = `https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code=${c}&topline=10&year=&month=&_=${Date.now()}`;
-        loadScript(holdingsUrl).then(async (apidata) => {
-          let holdings = [];
-          const html = apidata?.content || '';
-          const holdingsReportDate = extractHoldingsReportDate(html);
-          const holdingsIsLastQuarter = isLastQuarterReport(holdingsReportDate);
+        (async () => {
+          try {
+            const pz = await fetchFundPingzhongdata(c, { cacheTime: 10 * 60 * 1000 });
+            const rawCodes = Array.isArray(pz?.stockCodes) ? pz.stockCodes : [];
+            const codes = rawCodes
+              .map((code) => String(code).slice(0, 6))
+              .filter((code) => /^\d{6}$/.test(code))
+              .slice(0, 10);
 
-          // 如果不是上一季度末的披露数据，则不展示重仓（并避免继续解析/请求行情）
-          if (!holdingsIsLastQuarter) {
-            resolveH({ holdings: [], holdingsReportDate, holdingsIsLastQuarter: false });
-            return;
-          }
+            if (!codes.length) {
+              resolveH({ holdings: [], holdingsReportDate: null, holdingsIsLastQuarter: false });
+              return;
+            }
 
-          const headerRow = (html.match(/<thead[\s\S]*?<tr[\s\S]*?<\/tr>[\s\S]*?<\/thead>/i) || [])[0] || '';
-          const headerCells = (headerRow.match(/<th[\s\S]*?>([\s\S]*?)<\/th>/gi) || []).map(th => th.replace(/<[^>]*>/g, '').trim());
-          let idxCode = -1, idxName = -1, idxWeight = -1;
-          headerCells.forEach((h, i) => {
-            const t = h.replace(/\s+/g, '');
-            if (idxCode < 0 && (t.includes('股票代码') || t.includes('证券代码'))) idxCode = i;
-            if (idxName < 0 && (t.includes('股票名称') || t.includes('证券名称'))) idxName = i;
-            if (idxWeight < 0 && (t.includes('占净值比例') || t.includes('占比'))) idxWeight = i;
-          });
-          const rows = html.match(/<tbody[\s\S]*?<\/tbody>/i) || [];
-          const dataRows = rows.length ? rows[0].match(/<tr[\s\S]*?<\/tr>/gi) || [] : html.match(/<tr[\s\S]*?<\/tr>/gi) || [];
-          for (const r of dataRows) {
-            const tds = (r.match(/<td[\s\S]*?>([\s\S]*?)<\/td>/gi) || []).map(td => td.replace(/<[^>]*>/g, '').trim());
-            if (!tds.length) continue;
-            let code = '';
-            let name = '';
-            let weight = '';
-            if (idxCode >= 0 && tds[idxCode]) {
-              const m = tds[idxCode].match(/(\d{6})/);
-              code = m ? m[1] : tds[idxCode];
-            } else {
-              const codeIdx = tds.findIndex(txt => /^\d{6}$/.test(txt));
-              if (codeIdx >= 0) code = tds[codeIdx];
-            }
-            if (idxName >= 0 && tds[idxName]) {
-              name = tds[idxName];
-            } else if (code) {
-              const i = tds.findIndex(txt => txt && txt !== code && !/%$/.test(txt));
-              name = i >= 0 ? tds[i] : '';
-            }
-            if (idxWeight >= 0 && tds[idxWeight]) {
-              const wm = tds[idxWeight].match(/([\d.]+)\s*%/);
-              weight = wm ? `${wm[1]}%` : tds[idxWeight];
-            } else {
-              const wIdx = tds.findIndex(txt => /\d+(?:\.\d+)?\s*%/.test(txt));
-              weight = wIdx >= 0 ? tds[wIdx].match(/([\d.]+)\s*%/)?.[1] + '%' : '';
-            }
-            if (code || name || weight) {
-              holdings.push({ code, name, weight, change: null });
-            }
-          }
-          holdings = holdings.slice(0, 10);
-          const needQuotes = holdings.filter(h => /^\d{6}$/.test(h.code) || /^\d{5}$/.test(h.code));
-          if (needQuotes.length) {
-            try {
-              const tencentCodes = needQuotes.map(h => {
-                const cd = String(h.code || '');
-                if (/^\d{6}$/.test(cd)) {
-                  const pfx = cd.startsWith('6') || cd.startsWith('9') ? 'sh' : ((cd.startsWith('4') || cd.startsWith('8')) ? 'bj' : 'sz');
-                  return `s_${pfx}${cd}`;
-                }
-                if (/^\d{5}$/.test(cd)) {
-                  return `s_hk${cd}`;
-                }
-                return null;
-              }).filter(Boolean).join(',');
-              if (!tencentCodes) {
-                resolveH(holdings);
-                return;
-              }
-              const quoteUrl = `https://qt.gtimg.cn/q=${tencentCodes}`;
-              await new Promise((resQuote) => {
-                const scriptQuote = document.createElement('script');
-                scriptQuote.src = quoteUrl;
-                scriptQuote.onload = () => {
-                  needQuotes.forEach(h => {
-                    const cd = String(h.code || '');
-                    let varName = '';
-                    if (/^\d{6}$/.test(cd)) {
-                      const pfx = cd.startsWith('6') || cd.startsWith('9') ? 'sh' : ((cd.startsWith('4') || cd.startsWith('8')) ? 'bj' : 'sz');
-                      varName = `v_s_${pfx}${cd}`;
-                    } else if (/^\d{5}$/.test(cd)) {
-                      varName = `v_s_hk${cd}`;
-                    } else {
-                      return;
-                    }
-                    const dataStr = window[varName];
-                    if (dataStr) {
-                      const parts = dataStr.split('~');
-                      if (parts.length > 5) {
-                        h.change = parseFloat(parts[5]);
-                      }
-                    }
+            let holdings = codes.map((code) => ({
+              code,
+              name: '',
+              weight: '',
+              change: null
+            }));
+
+            const needQuotes = holdings.filter(h => /^\d{6}$/.test(h.code) || /^\d{5}$/.test(h.code));
+            if (needQuotes.length) {
+              try {
+                const tencentCodes = needQuotes.map(h => {
+                  const cd = String(h.code || '');
+                  if (/^\d{6}$/.test(cd)) {
+                    const pfx = cd.startsWith('6') || cd.startsWith('9') ? 'sh' : ((cd.startsWith('4') || cd.startsWith('8')) ? 'bj' : 'sz');
+                    return `s_${pfx}${cd}`;
+                  }
+                  if (/^\d{5}$/.test(cd)) {
+                    return `s_hk${cd}`;
+                  }
+                  return null;
+                }).filter(Boolean).join(',');
+                if (tencentCodes) {
+                  const quoteUrl = `https://qt.gtimg.cn/q=${tencentCodes}`;
+                  await new Promise((resQuote) => {
+                    const scriptQuote = document.createElement('script');
+                    scriptQuote.src = quoteUrl;
+                    scriptQuote.onload = () => {
+                      needQuotes.forEach(h => {
+                        const cd = String(h.code || '');
+                        let varName = '';
+                        if (/^\d{6}$/.test(cd)) {
+                          const pfx = cd.startsWith('6') || cd.startsWith('9') ? 'sh' : ((cd.startsWith('4') || cd.startsWith('8')) ? 'bj' : 'sz');
+                          varName = `v_s_${pfx}${cd}`;
+                        } else if (/^\d{5}$/.test(cd)) {
+                          varName = `v_s_hk${cd}`;
+                        } else {
+                          return;
+                        }
+                        const dataStr = window[varName];
+                        if (dataStr) {
+                          const parts = dataStr.split('~');
+                          if (parts.length > 5) {
+                            // parts[1] 是名称，parts[5] 是涨跌幅
+                            if (!h.name && parts[1]) {
+                              h.name = parts[1];
+                            }
+                            const chg = parseFloat(parts[5]);
+                            if (!Number.isNaN(chg)) {
+                              h.change = chg;
+                            }
+                          }
+                        }
+                      });
+                      if (document.body.contains(scriptQuote)) document.body.removeChild(scriptQuote);
+                      resQuote();
+                    };
+                    scriptQuote.onerror = () => {
+                      if (document.body.contains(scriptQuote)) document.body.removeChild(scriptQuote);
+                      resQuote();
+                    };
+                    document.body.appendChild(scriptQuote);
                   });
-                  if (document.body.contains(scriptQuote)) document.body.removeChild(scriptQuote);
-                  resQuote();
-                };
-                scriptQuote.onerror = () => {
-                  if (document.body.contains(scriptQuote)) document.body.removeChild(scriptQuote);
-                  resQuote();
-                };
-                document.body.appendChild(scriptQuote);
-              });
-            } catch (e) {
+                }
+              } catch (e) {
+              }
             }
+
+            // 使用 pingzhongdata 的结果作为展现依据：有前 10 代码即视为可展示
+            resolveH({
+              holdings,
+              holdingsReportDate: null,
+              holdingsIsLastQuarter: holdings.length > 0
+            });
+          } catch (e) {
+            resolveH({ holdings: [], holdingsReportDate: null, holdingsIsLastQuarter: false });
           }
-          resolveH({ holdings, holdingsReportDate, holdingsIsLastQuarter });
-        }).catch(() => resolveH({ holdings: [], holdingsReportDate: null, holdingsIsLastQuarter: false }));
+        })();
       });
       Promise.all([lsjzPromise, holdingsPromise]).then(([tData, holdingsResult]) => {
         const {
@@ -529,6 +509,141 @@ export const submitFeedback = async (formData) => {
   return response.json();
 };
 
+const PINGZHONGDATA_GLOBAL_KEYS = [
+  'ishb',
+  'fS_name',
+  'fS_code',
+  'fund_sourceRate',
+  'fund_Rate',
+  'fund_minsg',
+  'stockCodes',
+  'zqCodes',
+  'stockCodesNew',
+  'zqCodesNew',
+  'syl_1n',
+  'syl_6y',
+  'syl_3y',
+  'syl_1y',
+  'Data_fundSharesPositions',
+  'Data_netWorthTrend',
+  'Data_ACWorthTrend',
+  'Data_grandTotal',
+  'Data_rateInSimilarType',
+  'Data_rateInSimilarPersent',
+  'Data_fluctuationScale',
+  'Data_holderStructure',
+  'Data_assetAllocation',
+  'Data_performanceEvaluation',
+  'Data_currentFundManager',
+  'Data_buySedemption',
+  'swithSameType',
+];
+
+let pingzhongdataQueue = Promise.resolve();
+
+const enqueuePingzhongdataLoad = (fn) => {
+  const p = pingzhongdataQueue.then(fn, fn);
+  // 避免队列被 reject 永久阻塞
+  pingzhongdataQueue = p.catch(() => undefined);
+  return p;
+};
+
+const snapshotPingzhongdataGlobals = (fundCode) => {
+  const out = {};
+  for (const k of PINGZHONGDATA_GLOBAL_KEYS) {
+    if (typeof window?.[k] === 'undefined') continue;
+    try {
+      out[k] = JSON.parse(JSON.stringify(window[k]));
+    } catch (e) {
+      out[k] = window[k];
+    }
+  }
+
+  return {
+    fundCode: out.fS_code || fundCode,
+    fundName: out.fS_name || '',
+    ...out,
+  };
+};
+
+const jsonpLoadPingzhongdata = (fundCode, timeoutMs = 10000) => {
+  return new Promise((resolve, reject) => {
+    if (typeof document === 'undefined' || !document.body) {
+      reject(new Error('无浏览器环境'));
+      return;
+    }
+
+    const url = `https://fund.eastmoney.com/pingzhongdata/${fundCode}.js?v=${Date.now()}`;
+    const script = document.createElement('script');
+    script.src = url;
+    script.async = true;
+
+    let done = false;
+    let timer = null;
+
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      script.onload = null;
+      script.onerror = null;
+      if (document.body.contains(script)) document.body.removeChild(script);
+    };
+
+    timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      cleanup();
+      reject(new Error('pingzhongdata 请求超时'));
+    }, timeoutMs);
+
+    script.onload = () => {
+      if (done) return;
+      done = true;
+      const data = snapshotPingzhongdataGlobals(fundCode);
+      cleanup();
+      resolve(data);
+    };
+
+    script.onerror = () => {
+      if (done) return;
+      done = true;
+      cleanup();
+      reject(new Error('pingzhongdata 加载失败'));
+    };
+
+    document.body.appendChild(script);
+  });
+};
+
+const fetchAndParsePingzhongdata = async (fundCode) => {
+  // 使用 JSONP(script 注入) 方式获取并解析 pingzhongdata
+  return enqueuePingzhongdataLoad(() => jsonpLoadPingzhongdata(fundCode));
+};
+
+/**
+ * 获取并解析「基金走势图/资产等」数据（pingzhongdata）
+ * 来源：https://fund.eastmoney.com/pingzhongdata/${fundCode}.js
+ */
+export const fetchFundPingzhongdata = async (fundCode, { cacheTime = 10 * 60 * 1000 } = {}) => {
+  if (!fundCode) throw new Error('fundCode 不能为空');
+  if (typeof window === 'undefined' || typeof document === 'undefined') {
+    throw new Error('无浏览器环境');
+  }
+
+  const cacheKey = `pingzhongdata_${fundCode}`;
+
+  try {
+    return await cachedRequest(
+      () => fetchAndParsePingzhongdata(fundCode),
+      cacheKey,
+      { cacheTime }
+    );
+  } catch (e) {
+    clearCachedRequest(cacheKey);
+    throw e;
+  }
+};
+
 // 使用智谱 GLM 从 OCR 文本中抽取基金名称
 export const extractFundNamesWithLLM = async (ocrText) => {
   const apiKey = '8df8ccf74a174722847c83b7e222f2af.4A39rJvUeBVDmef1';
@@ -595,8 +710,6 @@ export const extractFundNamesWithLLM = async (ocrText) => {
   }
 };
 
-let historyQueue = Promise.resolve();
-
 export const fetchFundHistory = async (code, range = '1m') => {
   if (typeof window === 'undefined') return [];
 
@@ -609,73 +722,32 @@ export const fetchFundHistory = async (code, range = '1m') => {
     case '6m': start = start.subtract(6, 'month'); break;
     case '1y': start = start.subtract(1, 'year'); break;
     case '3y': start = start.subtract(3, 'year'); break;
+    case 'all': start = dayjs(0).tz(TZ); break;
     default: start = start.subtract(1, 'month');
   }
 
-  const sdate = start.format('YYYY-MM-DD');
-  const edate = end.format('YYYY-MM-DD');
-  const per = 49;
+  // 业绩走势统一走 pingzhongdata.Data_netWorthTrend
+  try {
+    const pz = await fetchFundPingzhongdata(code, { cacheTime: 10 * 60 * 1000 });
+    const trend = pz?.Data_netWorthTrend;
+    if (Array.isArray(trend) && trend.length) {
+      const startMs = start.startOf('day').valueOf();
+      // end 可能是当日任意时刻，这里用 end-of-day 包含最后一天
+      const endMs = end.endOf('day').valueOf();
+      const out = trend
+        .filter((d) => d && typeof d.x === 'number' && d.x >= startMs && d.x <= endMs)
+        .map((d) => {
+          const value = Number(d.y);
+          if (!Number.isFinite(value)) return null;
+          const date = dayjs(d.x).tz(TZ).format('YYYY-MM-DD');
+          return { date, value };
+        })
+        .filter(Boolean);
 
-  return new Promise((resolve) => {
-    historyQueue = historyQueue.then(async () => {
-      let allData = [];
-      let page = 1;
-      let totalPages = 1;
-
-      try {
-        const parseContent = (content) => {
-            if (!content) return [];
-            const rows = content.split('<tr>');
-            const data = [];
-            for (const row of rows) {
-                const cells = row.match(/<td[^>]*>(.*?)<\/td>/g);
-                if (cells && cells.length >= 2) {
-                    const dateStr = cells[0].replace(/<[^>]+>/g, '').trim();
-                    const valStr = cells[1].replace(/<[^>]+>/g, '').trim();
-                    const val = parseFloat(valStr);
-                    if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr) && !isNaN(val)) {
-                        data.push({ date: dateStr, value: val });
-                    }
-                }
-            }
-            return data;
-        };
-
-        // Fetch first page to get metadata
-        const firstUrl = `https://fundf10.eastmoney.com/F10DataApi.aspx?type=lsjz&code=${code}&page=${page}&per=${per}&sdate=${sdate}&edate=${edate}`;
-        const firstApidata = await loadScript(firstUrl);
-
-        if (!firstApidata || !firstApidata.content || firstApidata.content.includes('暂无数据')) {
-          resolve([]);
-          return;
-        }
-
-        // Parse total pages
-        if (firstApidata.pages) {
-            totalPages = parseInt(firstApidata.pages, 10) || 1;
-        }
-
-        allData = allData.concat(parseContent(firstApidata.content));
-
-        // Fetch remaining pages
-        for (page = 2; page <= totalPages; page++) {
-             const nextUrl = `https://fundf10.eastmoney.com/F10DataApi.aspx?type=lsjz&code=${code}&page=${page}&per=${per}&sdate=${sdate}&edate=${edate}`;
-             const nextApidata = await loadScript(nextUrl);
-             if (nextApidata && nextApidata.content) {
-                 allData = allData.concat(parseContent(nextApidata.content));
-             }
-        }
-
-        // The data comes in reverse chronological order (newest first), so we need to reverse it for the chart (oldest first)
-        resolve(allData.reverse());
-
-      } catch (e) {
-        console.error('Fetch history error:', e);
-        resolve([]);
-      }
-    }).catch((e) => {
-       console.error('Queue error:', e);
-       resolve([]);
-    });
-  });
+      if (out.length) return out;
+    }
+  } catch (e) {
+    return [];
+  }
+  return [];
 };
