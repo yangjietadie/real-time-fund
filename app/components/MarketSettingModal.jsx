@@ -1,7 +1,23 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { AnimatePresence, Reorder } from "framer-motion";
+import { AnimatePresence } from "framer-motion";
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  closestCenter,
+} from "@dnd-kit/core";
+import { restrictToParentElement } from "@dnd-kit/modifiers";
+import {
+  SortableContext,
+  rectSortingStrategy,
+  useSortable,
+  arrayMove,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import {
   Drawer,
   DrawerContent,
@@ -19,6 +35,94 @@ import {
 import { CloseIcon, MinusIcon, ResetIcon, SettingsIcon } from "./Icons";
 import ConfirmModal from "./ConfirmModal";
 import { cn } from "@/lib/utils";
+
+function SortableIndexItem({ item, canRemove, onRemove }) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: item.code });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    cursor: isDragging ? "grabbing" : "grab",
+    flex: "0 0 calc((100% - 24px) / 3)",
+    touchAction: "none",
+    ...(isDragging && {
+      position: "relative",
+      zIndex: 10,
+      opacity: 0.9,
+      boxShadow: "0 8px 24px rgba(0,0,0,0.15)",
+    }),
+  };
+
+  const isUp = item.change >= 0;
+  const color = isUp ? "var(--danger)" : "var(--success)";
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={cn(
+        "glass card",
+        "relative flex flex-col gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--card)] px-3 py-2"
+      )}
+      {...attributes}
+      {...listeners}
+    >
+      {canRemove && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove(item.code);
+          }}
+          className="icon-button"
+          style={{
+            position: "absolute",
+            top: 4,
+            right: 4,
+            width: 18,
+            height: 18,
+            borderRadius: "999px",
+            backgroundColor: "rgba(255,96,96,0.1)",
+            color: "var(--danger)",
+            border: "none",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+          aria-label={`移除 ${item.name}`}
+        >
+          <MinusIcon width="10" height="10" />
+        </button>
+      )}
+      <div
+        style={{
+          fontSize: 13,
+          fontWeight: 500,
+          paddingRight: 18,
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {item.name}
+      </div>
+      <div style={{ fontSize: 18, fontWeight: 600, color }}>
+        {item.price?.toFixed ? item.price.toFixed(2) : String(item.price ?? "-")}
+      </div>
+      <div style={{ fontSize: 12, color }}>
+        {(item.change >= 0 ? "+" : "") + item.change.toFixed(2)}{" "}
+        {(item.changePercent >= 0 ? "+" : "") + item.changePercent.toFixed(2)}%
+      </div>
+    </div>
+  );
+}
 
 /**
  * 指数个性化设置弹框
@@ -60,6 +164,11 @@ export default function MarketSettingModal({
 
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
 
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor)
+  );
+
   const handleToggleCode = (code) => {
     if (!code) return;
     if (selectedSet.has(code)) {
@@ -73,8 +182,14 @@ export default function MarketSettingModal({
     }
   };
 
-  const handleReorder = (newOrder) => {
-    onChangeSelected?.(newOrder);
+  const handleDragEnd = (event) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const oldIndex = selectedCodes.indexOf(active.id);
+    const newIndex = selectedCodes.indexOf(over.id);
+    if (oldIndex === -1 || newIndex === -1) return;
+    const next = arrayMove(selectedCodes, oldIndex, newIndex);
+    onChangeSelected?.(next);
   };
 
   const body = (
@@ -112,98 +227,28 @@ export default function MarketSettingModal({
             暂未添加指数，请在下方选择想要关注的指数。
           </div>
         ) : (
-          <Reorder.Group
-            as="div"
-            axis="y"
-            values={selectedCodes}
-            onReorder={handleReorder}
-            className="flex flex-wrap gap-3"
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragEnd={handleDragEnd}
+            modifiers={[restrictToParentElement]}
           >
-            <AnimatePresence initial={false}>
-              {selectedList.map((item) => {
-                const isUp = item.change >= 0;
-                const color =
-                  isUp ? "var(--danger)" : "var(--success)";
-                return (
-                  <Reorder.Item
+            <SortableContext
+              items={selectedCodes}
+              strategy={rectSortingStrategy}
+            >
+              <div className="flex flex-wrap gap-3">
+                {selectedList.map((item) => (
+                  <SortableIndexItem
                     key={item.code}
-                    value={item.code}
-                    className={cn(
-                      "glass card",
-                      "relative flex flex-col gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--card)] px-3 py-2"
-                    )}
-                    style={{
-                      cursor: "grab",
-                      flex: "0 0 calc((100% - 24px) / 3)",
-                    }}
-                  >
-                    {selectedCodes.length > 1 && (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleToggleCode(item.code);
-                        }}
-                        className="icon-button"
-                        style={{
-                          position: "absolute",
-                          top: 4,
-                          right: 4,
-                          width: 18,
-                          height: 18,
-                          borderRadius: "999px",
-                          backgroundColor: "rgba(255,96,96,0.1)",
-                          color: "var(--danger)",
-                          border: "none",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                        }}
-                        aria-label={`移除 ${item.name}`}
-                      >
-                        <MinusIcon width="10" height="10" />
-                      </button>
-                    )}
-                    <div
-                      style={{
-                        fontSize: 13,
-                        fontWeight: 500,
-                        paddingRight: 18,
-                        whiteSpace: "nowrap",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                      }}
-                    >
-                      {item.name}
-                    </div>
-                    <div
-                      style={{
-                        fontSize: 18,
-                        fontWeight: 600,
-                        color,
-                      }}
-                    >
-                      {item.price?.toFixed
-                        ? item.price.toFixed(2)
-                        : String(item.price ?? "-")}
-                    </div>
-                    <div
-                      style={{
-                        fontSize: 12,
-                        color,
-                      }}
-                    >
-                      {(item.change >= 0 ? "+" : "") +
-                        item.change.toFixed(2)}{" "}
-                      {(item.changePercent >= 0 ? "+" : "") +
-                        item.changePercent.toFixed(2)}
-                      %
-                    </div>
-                  </Reorder.Item>
-                );
-              })}
-            </AnimatePresence>
-          </Reorder.Group>
+                    item={item}
+                    canRemove={selectedCodes.length > 1}
+                    onRemove={handleToggleCode}
+                  />
+                ))}
+              </div>
+            </SortableContext>
+          </DndContext>
         )}
       </div>
 
