@@ -3719,7 +3719,7 @@ export default function HomePage() {
                   initial={{ opacity: 0, y: -10 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -10 }}
-                  className="search-dropdown glass"
+                  className="search-dropdown glass scrollbar-y-styled"
                 >
                   {searchResults.length > 0 ? (
                     <div className="search-results">
